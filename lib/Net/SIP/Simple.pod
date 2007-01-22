@@ -82,6 +82,10 @@ B<invite>).
 SIP address of local sender, either full SIP address or only part before \@, in which
 case B<domain> has to be provided.
 
+=item route
+
+Optional list of SIP routes which will be added to route requests.
+
 =item loop
 
 Eventloop object for dispatcher, see L<Net::SIP::Dispatcher::Eventloop>. Usually
@@ -97,6 +101,17 @@ objects.
 =item domain2proxy|d2p
 
 Hash with mapping between domain and upstream proxy. See same key in the constructor
+of L<Net::SIP::Dispatcher> for more details.
+
+=item domain2leg|d2l
+
+Hash with mapping between domain and outgoing leg. See same key in the constructor
+of L<Net::SIP::Dispatcher> for more details.
+
+=item leg2proxy|l2p
+
+Reference to list if \@pairs containing the leg and the outgoing proxy to map
+a leg to an outgoing proxy.  See same key in the constructor
 of L<Net::SIP::Dispatcher> for more details.
 
 =back

@@ -12,12 +12,13 @@ package Net::SIP::Util;
 use Digest::MD5 'md5_hex';
 use IO::Socket;
 use Net::SIP::Debug;
-use Carp 'confess';
+use Carp qw(confess croak);
 use base 'Exporter';
 
 our @EXPORT_OK = qw( 
 	sip_hdrval2parts 
 	sip_parts2hdrval
+	sip_uri2parts
 	create_socket_to 
 	create_rtp_sockets 
 	invoke_callback 
@@ -36,6 +37,7 @@ our %EXPORT_TAGS = ( all => \@EXPORT_OK );
 #   %parameter: additional parameter
 ###########################################################################
 sub sip_hdrval2parts {
+	croak( "usage: sip_hdrval2parts( key => val )" ) if @_!=2;
 	my ($key,$v) = @_;
 	return if !defined($v);
 	my $delim = ';';
@@ -125,6 +127,31 @@ sub sip_parts2hdrval {
 	return $val;
 }
 	
+
+###########################################################################
+# extract parts from SIP URI
+# Args: $uri
+# Returns: $domain || ($domain,$user,$proto,$data,$param)
+#  $domain: SIP domain maybe with port
+#  $user:   user part
+#  $proto:  'sip'|'sips'
+#  $data:   full part before any params
+#  $param:  hashref with params, e.g { transport => 'udp',... }
+###########################################################################
+sub sip_uri2parts {
+	my $uri = shift;
+	my ($data,$param) = sip_hdrval2parts( uri => $uri );
+	if ( $data =~m{<(sips?):([^\s\@]*)\@([^>\s]+)>}i
+		|| $data =~m{^(?:(sips?):)?([^\s\@]*)\@([\w\-\.:]+)}i ) {
+		my ($proto,$user,$domain) = ($1,$2,$3);
+		$proto ||= 'sip';
+		return wantarray 
+			? ($domain,$user,lc($proto),$data,$param)
+			: $domain
+	} else {
+		return;
+	}
+}
 
 ###########################################################################
 # create socket preferable on port 5060 from which one might reach the given IP

@@ -17,6 +17,7 @@ use fields (
 	'dispatcher',         # Net::SIP::Dispatcher
 	'loop',               # Net::SIP::Dispatcher::Eventloop or similar
 	'outgoing_proxy',     # optional outgoing proxy (addr:port)
+	'route',              # more routes
 	'registrar',          # optional registrar (addr:port)
 	'auth',               # Auth data, see Net::SIP::Endpoint
 	'from',               # SIP address of caller
@@ -48,6 +49,7 @@ use Net::SIP::Debug;
 #                      port defaults to 5060.
 #     outgoing_proxy - specify outgoing proxy, will create leg if necessary
 #     proxy          - alias to outgoing_proxy
+#     route|routes   - \@list with SIP routes in right syntax "<sip:host:port;lr>"...
 #     registrar      - use registrar for registration 
 #     auth           - auth data: [ user,pass ] or { realm1 => [user,pass],.. }
 #     from           - myself, used for calls and registration
@@ -60,6 +62,10 @@ use Net::SIP::Debug;
 #                      used to find proxy for domain. If nothing matches here
 #                      DNS need to be used. Special domain '*' catches all
 #     d2p            - alias for domain2proxy
+#     domain2leg|d2l - hash of { domain => leg } similar to domain2proxy
+#                      leg is the Net::SIP::Leg object which can deliver for domain
+#     leg2proxy|l2p  - \@list of [ leg, ip:port ] for associating an leg with 
+#                      an outgoing proxy
 # Returns: $self
 # Comment: 
 # FIXME
@@ -117,17 +123,21 @@ sub new {
 		|| Net::SIP::Dispatcher::Eventloop->new;
 
 	my $d2p = delete $args{domain2proxy} || delete $args{d2p};
+	my $d2l = delete $args{domain2leg} || delete $args{d2l};
+	my $l2p = delete $args{leg2proxy} || delete $args{l2p};
 	my $disp = delete $args{dispatcher}
 		|| Net::SIP::Dispatcher->new(
 			$legs,
 			$loop,
 			outgoing_proxy => $ob,
 			domain2proxy => $d2p,
+			domain2leg => $d2l,
 		);
 
 	my $endpoint = Net::SIP::Endpoint->new( $disp );
 
 	my $self = fields::new( $class );
+	my $routes = delete $args{routes} || delete $args{route};
 	%$self = (
 		auth => $auth,
 		from => $from,
@@ -136,6 +146,7 @@ sub new {
 		registrar => $registrar,
 		dispatcher => $disp,
 		loop => $loop,
+		route => $routes,
 	);
 	return $self;
 }
@@ -150,7 +161,7 @@ sub error {
 	my Net::SIP::Simple $self = shift;
 	if ( @_ ) {
 		$self->{last_error} = shift;
-		DEBUG( Net::SIP::Debug::stacktrace( "set error to ".$self->{last_error}) );
+		DEBUG( 100,Net::SIP::Debug::stacktrace( "set error to ".$self->{last_error}) );
 	}
 	return $self->{last_error};
 }
@@ -337,7 +348,7 @@ sub listen {
 	my $receive = sub {
 		my ($self,$args,$endpoint,$ctx,$request,$leg,$from) = @_;
 		$request->method eq 'INVITE' or do {
-			DEBUG( "drop non-INVITE request" );
+			DEBUG( 10,"drop non-INVITE request: ".$request->dump );
 			$self->{endpoint}->close_context( $ctx );
 			return;
 		};
@@ -345,7 +356,7 @@ sub listen {
 		if ( my $filter = $args->{filter} ) {
 			my $rv = invoke_callback( $filter, $ctx->{from} );
 			if ( !$rv ) {
-				DEBUG( "call from '$ctx->{from}' rejected" );
+				DEBUG( 1, "call from '$ctx->{from}' rejected" );
 				$self->{endpoint}->close_context( $ctx );
 				return;
 			}

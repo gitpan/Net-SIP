@@ -23,7 +23,7 @@ usage: $0 [ options ] FROM TO
 Makes SIP call from FROM to TO, optional record data
 and optional hang up after some time
 Options:
-  -d|--debug                   Enable debugging
+  -d|--debug [level]           Enable debugging
   -h|--help                    Help (this info)
   -P|--proxy host[:port]       use outgoing proxy, register there unless registrar given
   -R|--registrar host[:port]   register at given address
@@ -31,6 +31,7 @@ Options:
   -T|--time interval           hang up after interval seconds
   --username name              username for authorization
   --password pass              password for authorization
+  --route host[:port]          add SIP route, can be specified multiple times
 
 Examples:
   $0 -T 10 -O record.data sip:30\@192.168.178.4 sip:31\@192.168.178.1
@@ -46,8 +47,9 @@ EOS
 ###################################################
 
 my ($proxy,$outfile,$registrar,$username,$password,$hangup);
+my (@routes,$debug);
 GetOptions(
-	'd|debug' => sub { Net::SIP::Debug->level(1) },
+	'd|debug:i' => \$debug,
 	'h|help' => sub { usage() },
 	'P|proxy=s' => \$proxy,
 	'R|registrar=s' => \$registrar,
@@ -55,15 +57,16 @@ GetOptions(
 	'T|time=i' => \$hangup,
 	'username=s' =>\$username,
 	'password=s' =>\$password,
+	'route=s' => \@routes,
 ) || usage( "bad option" );
 
 
+Net::SIP::Debug->level( $debug || 1 ) if defined $debug;
 my ($from,$to) = @ARGV;
 $to || usage( "no target" );
 
 # register at proxy if proxy given and no registrar
 $registrar ||= $proxy; 
-DEBUG( "proxy=$proxy registrar=$registrar from=$from to=$to" );
 
 ###################################################
 # if no proxy is given we need to find out
@@ -91,6 +94,8 @@ if ( !$proxy ) {
 			LocalPort => 0
 		) || die "cannot create leg at $addr: $!";
 	}
+
+	$leg = Net::SIP::Leg->new( sock => $leg );
 }
 
 ###################################################
@@ -114,6 +119,7 @@ foreach my $addr ( $proxy,$registrar) {
 my $ua = Net::SIP::Simple->new(
 	from => $from,
 	outgoing_proxy => $proxy,
+	route => \@routes,
 	legs => \@legs,
 	$username ? ( auth => [ $username,$password ] ):(),
 );

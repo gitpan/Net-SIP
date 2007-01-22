@@ -11,7 +11,7 @@ use strict;
 use warnings;
 
 package Net::SIP::StatelessProxy;
-use fields qw( dispatcher registrar at_marker );
+use fields qw( dispatcher registrar rewrite_contact );
 
 use Net::SIP::Util ':all';
 use Net::SIP::Registrar;
@@ -30,8 +30,12 @@ use Net::SIP::Debug;
 #        requests using the registrar and fall back to the normal
 #        behavior if registrar cannot handle the request.
 #        can also be an existing Net::SIP::Registrar object
-#     at_marker: uniq marker which is used in rewriting contact headers
-#        if not given a reasonable default will be used
+#     rewrite_contact: callback to rewrite contact header. If called with from header
+#        it should return a string of form \w+. If called
+#        again with this string it should return the original header back.
+#        if called on a string without @ which cannot rewritten back it
+#        should return undef. If not given a reasonable default will be
+#        used.
 # Returns: $self
 ###########################################################################
 sub new {
@@ -50,12 +54,42 @@ sub new {
 			);
 		}
 	}
-	$self->{at_marker} ||= '++'.md5_hex( 
-		map { $_->{proto}.':'.$_->{addr}.':'.$_->{port} } 
-		$disp->get_legs 
-	).'++';
+	$self->{rewrite_contact} ||= [ \&_default_rewrite_contact, $self ];
 
 	return $self;
+}
+
+# default handler for rewriting, does simple XOR only,
+# this is not enough if you need to hide internal addresses
+sub _default_rewrite_contact {
+	my ($self,$contact) = @_;
+	my $secret = md5_hex( 
+		sort { $a cmp $b }
+		map { $_->{proto}.':'.$_->{addr}.':'.$_->{port} }
+		$self->{dispatcher}->get_legs 
+	);
+
+	my $new;
+	if ( $contact =~m{\@} ) {
+		# needs to be rewritten
+		$contact .= "MARKER";
+		my $lc = length($contact);
+		$secret = substr( $secret x int( $lc/length($secret) +1 ), 0,$lc );
+		$new = unpack( 'H*',( $contact ^ $secret ));
+		DEBUG( 100,"rewrite $contact -> $new" );
+	} elsif ( $contact =~m{^[0-9a-f]+$} ) {
+		# needs to be written back
+		$new = pack( 'H*',$contact );
+		my $lc = length($new);
+		$secret = substr( $secret x int( $lc/length($secret) +1 ), 0,$lc );
+		$new = $new ^ $secret;
+		DEBUG( 100,"rewrite back $contact -> $new" );
+		$new =~s{MARKER$}{} || return;
+	} else {
+		# invalid format
+		DEBUG( 100,"no rewriting of $contact" );
+	}
+	return $new;
 }
 		
 ###########################################################################
@@ -64,12 +98,11 @@ sub new {
 #    $packet: Net::SIP::Request
 #    $leg: incoming leg
 #    $from: ip:port where packet came from
-# Returns: bool
-#    true if successfully handeled, false if not handled
+# Returns: NONE
 ###########################################################################
 sub receive {
 	my ($self,$packet,$incoming_leg,$from) = @_;
-	DEBUG( "received ".$packet->as_string );
+	DEBUG( 10,"received ".$packet->dump );
 
 	if ( ( my $reg = $self->{registrar} ) 
 		and $packet->is_request
@@ -82,32 +115,39 @@ sub receive {
 
 	# Prepare for forwarding, e.g adjust headers 
 	# (add record-route)
-	if ( my($code,$text) = $incoming_leg->forward_incoming( $packet )) {
-		DEBUG( "ERROR while forwarding: $code, $text" );
+	if ( my $err = $incoming_leg->forward_incoming( $packet )) {
+		my ($code,$text) = @$err;
+		DEBUG( 10,"ERROR while forwarding: $code, $text" );
 		return;
 	}
 
-	my $at_marker = $self->{at_marker};
+	my $rewrite_contact = $self->{rewrite_contact};
 	my $disp = $self->{dispatcher};
 
 	# find out how to forward packet
-	my $dst_addr;
+	my ($dst_addr,$outgoing_leg);
 	if ( $packet->is_response ) {
 		# find out where to send packet by parsing the upper via
 		# which should contain the addr of the next hop
 
 		my ($via) = $packet->get_header( 'via' ) or do {
-			DEBUG( "no via header in packet. DROP" );
+			DEBUG( 10,"no via header in packet. DROP" );
 			return;
 		};
 		my ($first,$param) = sip_hdrval2parts( via => $via );
 		my ($addr,$port) = $first =~m{([\w\-\.]+)(?::(\d+))?\s*$};
 		$port ||= 5060; # FIXME default for sip, not sips!
 		$dst_addr = "$addr:$port";
-		DEBUG( "get dst_addr from header: $first -> $dst_addr" );
+		DEBUG( 100,"get dst_addr from header: $first -> $dst_addr" );
+
+		if ( my $received = $param->{received} ) {
+			my ($addr,$port) = split( ':',$received,2 );
+			($outgoing_leg) = $disp->get_legs( addr => $addr, port => $port );
+			# FIXME: should we drop packet if we don't have the specified leg?
+		}
 
 	} else {
-		# check if the URI contains the at_marker
+		# check if the URI was handled by rewrite_contact
 		# this is the case where the Contact-Header was rewritten
 		# (see below) and a new request came in using the new
 		# contact header. In this case we need to rewrite the URI
@@ -115,51 +155,98 @@ sub receive {
 
 		my ($to) = sip_hdrval2parts( uri => $packet->uri );
 		$to = $1 if $to =~m{<(\w+:\S+)>};
-		if ( $to =~s{\Q$at_marker\E([^@]+)(.*)}{\@$1} ) {
-			DEBUG( "rewrote URI from '%s' to '%s'", $packet->uri, $to );
+		if ( $to =~m{^(.*?)(\w+)(\@.*)} 
+			&& ( my $back = invoke_callback( $rewrite_contact,$2 ) )) {
+			$to = $1.$back;
+			DEBUG( 10,"rewrote URI from '%s' to '%s'", $packet->uri, $to );
 			$packet->set_uri( $to )
+		}
+
+		# if the top route header points to a local leg we use this as
+		# outgoing leg
+		if ( my ($route) = $packet->get_header( 'route' ) ) {
+			my ($data) = sip_hdrval2parts( route => $route );
+			my ($addr,$port) = $data =~m{([\w\-\.]+)(?::(\d+))?\s*$};
+			($outgoing_leg) = $disp->get_legs( addr => $addr, port => $port );
 		}
 	}
 
-	# FIXME: if it's a response use $param->{received} to find out 
-	# the leg through which the request got send
-	# instead of simply using the other leg
-	my $outgoing_leg = first { $_ != $incoming_leg } $disp->get_legs;
-	$outgoing_leg ||= $incoming_leg; # if only one leg is used
+	my @args = ( $dst_addr,$outgoing_leg );
+
+	if ( !$outgoing_leg || ! $dst_addr ) {
+		# try to get leg based on URI: ask dispatcher
+		return $self->{dispatcher}->resolve_uri(
+			$packet->uri,
+			\$args[0],
+			\$args[1],
+			[ \&__forward,$self,$packet,$incoming_leg,\@args ]
+
+		)
+	} else {
+		return __forward( $self,$packet,$incoming_leg,\@args );
+	}
+}
+
+###########################################################################
+# second part of receive
+# will be called either directly from receive or from a callback while
+# resolving the URI. In this case @error has to be checked
+# Args: ($self,$packet,$incoming_leg,$args,@eror)
+#   $args: [ $dst_addr,$outgoing_leg ]
+#   @error: set if resolving URI failed
+# Returns: NONE
+###########################################################################
+sub __forward {
+	my ($self,$packet,$incoming_leg,$args,@error) = @_;
+	my ($dst_addr,$outgoing_leg) = @$args;
+
+	if (@error) {
+		DEBUG( 10,"cannot resolve URI '%s: %s' for forwarding",$packet->uri,$error[0] );
+		return;
+	}
 
 	# rewrite contact header
 	if ( my @contact = $packet->get_header( 'contact' ) ) {
 
+		my $rewrite_contact = $self->{rewrite_contact};
 		foreach my $c (@contact) {
 
 			# rewrite all sip(s) contacts
 			my ($data,$p) = sip_hdrval2parts( contact => $c );
 			my ($pre,$addr,$post) = 
-				$data =~m{^(.*<)(sips?:[^>\s]+)(>.*)}i ? ($1,$2,$3) :
-				$data =~m{^(sips?:[^>\s]+)$}i ? ('',$1,'') :
+				$data =~m{^(.*<sips?:)([^>\s]+)(>.*)}i ? ($1,$2,$3) :
+				$data =~m{^(sips?:)([^>\s]+)$}i ? ($1,$2,'') :
 				next;
 			
-			# if contact contains my at_marker rewrite back
-			if ( $addr =~s{\Q$at_marker\E([^@]+)(.*)}{\@$1} ) {
+			# if contact was rewritten rewrite back
+			if ( $addr =~m{^(\w+)(\@.*)} &&
+				( my $back = $1 && invoke_callback($rewrite_contact,$1))) {
+				$addr = $back;
 				my $cnew = sip_parts2hdrval( 'contact', $pre.$addr.$post, $p );
-				DEBUG( "rewrote back '$c' to '$cnew'" );
+				DEBUG( 50,"rewrote back '$c' to '$cnew'" );
 				$c = $cnew;
 
-			# otherwise introduce marker
+			# otherwise rewrite it
 			} else {
-				$addr =~s{\@}{$at_marker};
+				$addr = invoke_callback( $rewrite_contact,$addr);
 				$addr .= '@'.$outgoing_leg->{addr}.':'.$outgoing_leg->{port};
 				my $cnew = sip_parts2hdrval( 'contact', $pre.$addr.$post, $p );
-				DEBUG( "rewrote '$c' to '$cnew'" );
+				DEBUG( 50,"rewrote '$c' to '$cnew'" );
 				$c = $cnew;
 			}
 		}
 		$packet->set_header( contact => \@contact );
 	}
 
+	# prepare outgoing packet
+	if ( my $err = $outgoing_leg->forward_outgoing( $packet,$incoming_leg )) {
+		my ($code,$text) = @$err;
+		DEBUG( 10,"ERROR while forwarding: $code, $text" );
+		return;
+	}
 
 	# Just forward packet via the outgoing_leg
-	$disp->deliver( $packet, 
+	$self->{dispatcher}->deliver( $packet, 
 		leg => $outgoing_leg, 
 		dst_addr => $dst_addr, 
 		do_retransmits => 0 

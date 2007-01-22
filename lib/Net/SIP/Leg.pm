@@ -16,14 +16,14 @@ use Net::SIP::Packet;
 use Net::SIP::Request;
 use Net::SIP::Response;
 
-use fields qw( sock addr port proto contact branch _via );
+use fields qw( sock addr port proto contact branch via );
 
 # sock: the socket for the leg
 # addr,port: addr,port where it listens
 # proto: udp|tcp
 # contact: to identify myself (default from addr:port)
 # branch: branch-tag for via header
-# _via: precomputed via value
+# via: precomputed via value
 
 ###########################################################################
 # create a new leg
@@ -50,7 +50,11 @@ sub new {
 
 	} elsif ( my $addr = $self->{addr} = delete $args{addr} ) {
 		my $port = delete $args{port};
-		$port = 5060 if ! defined $port; # port = 0 -> get port from system
+		# port = 0 -> get port from system
+		if ( ! defined $port ) { 
+			$port = $1 if $addr =~s{:(\d+)$}{};
+			$port ||= 5060; 
+		} 
 		my $proto = $self->{proto} = delete $args{proto} || 'udp';
 		$self->{sock} = IO::Socket::INET->new(
 			Proto => $proto,
@@ -76,7 +80,7 @@ sub new {
 		( delete $args{branch} || md5_hex( @{$self}{qw( addr port proto )} ));
 
 	$self->{contact} =~m{^\w+:(.*)};
-	$self->{_via} =  sprintf( "SIP/2.0/%s %s;branch=%s",
+	$self->{via} =  sprintf( "SIP/2.0/%s %s;branch=%s",
 		uc($self->{proto}),$1, $self->{branch} );
 
 	return $self;
@@ -91,10 +95,14 @@ sub new {
 #   text: error description (e.g max-forwards reached..)
 ###########################################################################
 sub forward_incoming {
-	my ($self,$packet) = @_;
+	my Net::SIP::Leg $self = shift;
+	my ($packet) = @_;
 
 	# Max-Fowards
-	my $maxf = $packet->get_header( 'max-forwards' ) || 70;
+	my $maxf = $packet->get_header( 'max-forwards' );
+	# we don't want to put somebody Max-Forwards: 7363535353 into the header
+	# and then crafting a loop, so limit it to the default value
+	$maxf = 70 if !$maxf || $maxf>70; 
 	$maxf--;
 	if ( $maxf <= 0 ) {
 		# just drop
@@ -162,14 +170,58 @@ sub forward_incoming {
 		if ( defined $remove_route ) {
 			$packet->scan_header( route => [ sub {
 				my ($rr,$hdr) = @_;
-				$hdr->remove if $rr-- == 0;
+				$hdr->remove if $$rr-- == 0;
 			}, \$remove_route]);
 		}
 
-		# Add Record-Route to request
-		$packet->insert_header( 'record-route', '<'.$self->{contact}.';lr>' );
+		# Add Record-Route to request, except
+		# to REGISTER (RFC3261, 10.2)
+		$packet->insert_header( 'record-route', '<'.$self->{contact}.';lr>' )
+			if $packet->method ne 'REGISTER';
 	}
 
+	return;
+}
+
+###########################################################################
+# prepare packet which gets forwarded through this leg
+# packet was processed before by forward_incoming on (usually) another
+# leg on the same dispatcher.
+# Args: ($self,$packet,$incoming_leg)
+#   $packet: outgoing Net::SIP::Packet, gets modified in-place
+#   $incoming_leg: leg where packet came in
+# Returns: undef | [code,text]
+#   code: error code (can be empty if just drop packet on error)
+#   text: error description (e.g max-forwards reached..)
+###########################################################################
+sub forward_outgoing {
+	my Net::SIP::Leg $self = shift;
+	my ($packet,$incoming_leg) = @_;
+
+	if ( $packet->is_request ) {
+		# Add Record-Route to request, except
+		# to REGISTER (RFC3261, 10.2)
+		# This is necessary, because these information are used in in new requests
+		# from UAC to UAS, but also from UAS to UAC and UAS should talk to this leg
+		# and not to the leg, where the request came in.
+		$packet->insert_header( 'record-route', '<'.$self->{contact}.';lr>' )
+			if $packet->method ne 'REGISTER';
+
+		# strip myself from route header, because I'm done
+		if ( my @route = $packet->get_header( 'route' ) ) {
+			my $route = $route[0];
+			$route = $1 if $route =~m{^<(.*)>};
+			($route) = sip_hdrval2parts( route => $route );
+			if ( $route eq $self->{contact} ) {
+				# top route was me, remove it
+				my $remove_route = 0;
+				$packet->scan_header( route => [ sub {
+					my ($rr,$hdr) = @_;
+					$hdr->remove if $$rr-- == 0;
+				}, \$remove_route]);
+			}
+		}
+	}
 	return;
 }
 
@@ -195,7 +247,7 @@ sub deliver {
 		# one because it might be retried later
 		# (could skip this for tcp?)
 		$packet = $packet->clone; 
-		$packet->insert_header( via => $self->{_via} );
+		$packet->insert_header( via => $self->{via} );
 	}
 
 	my ($proto,$host,$port) = 
@@ -215,7 +267,7 @@ sub deliver {
 
 	if ( $self->{proto} ne 'udp' ) {
 		use Errno 'EINVAL';
-		DEBUG( "can only proto udp for now, but not $self->{proto}" );
+		DEBUG( 1,"can only proto udp for now, but not $self->{proto}" );
 		invoke_callback( $callback, EINVAL );
 	}
 
@@ -223,12 +275,13 @@ sub deliver {
 	$host = inet_aton( $host );
 	my $target = sockaddr_in( $port,$host );
 	unless ( $self->{sock}->send( $packet->as_string,0,$target )) {
-		DEBUG( "send failed: callback=$callback error=$!" );
+		DEBUG( 1,"send failed: callback=$callback error=$!" );
 		invoke_callback( $callback, $! );
 		return;
 	}
 
-	DEBUG( "delivery from $self->{addr}:$self->{port} to $addr OK:\n".$packet->as_string );
+	DEBUG( 2, "delivery from $self->{addr}:$self->{port} to $addr OK:\n%s",
+		$packet->dump( Net::SIP::Debug->level -2 ) );
 
 	# XXXX dont forget to call callback back with ENOERR if 
 	# delivery by tcp successful
@@ -248,23 +301,24 @@ sub receive {
 	my Net::SIP::Leg $self = shift;
 
 	if ( $self->{proto} ne 'udp' ) {
-		DEBUG( "only udp is supported at the moment" );
+		DEBUG( 1,"only udp is supported at the moment" );
 		return;
 	}
 
 	my $from = recv( $self->{sock}, my $buf, 2**16, 0 ) or do {
-		DEBUG( "recv failed: $!" );
+		DEBUG( 1,"recv failed: $!" );
 		return;
 	};
 
 	my $packet = eval { Net::SIP::Packet->new( $buf ) } or do {
-		DEBUG( "cannot parse buf as SIP: $@\n$buf" );
+		DEBUG( 3,"cannot parse buf as SIP: $@\n$buf" );
 		return;
 	};
 
 	my ($port,$host) = unpack_sockaddr_in( $from );
 	$host = inet_ntoa($host);
-	DEBUG( "received on $self->{addr}:$self->{port} from $host:$port packet\n".$packet->as_string );
+	DEBUG( 2,"received on $self->{addr}:$self->{port} from $host:$port packet\n%s",
+		$packet->dump( Net::SIP::Debug->level -2 ));
 
 	return ($packet,"$host:$port");
 }
@@ -299,6 +353,15 @@ sub can_deliver_to {
 	return 1
 }
 
+###########################################################################
+# returns FD on Leg
+# Args: $self
+# Returns: socket of leg
+###########################################################################
+sub fd {
+	my Net::SIP::Leg $self = shift;
+	return $self->{sock};
+}
 
 	
 1;
