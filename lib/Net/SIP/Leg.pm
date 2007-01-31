@@ -48,13 +48,13 @@ sub new {
 		$self->{addr}  = inet_ntoa( $addr );
 		$self->{proto} = ( $sock->socktype == SOCK_STREAM ) ? 'tcp':'udp'
 
-	} elsif ( my $addr = $self->{addr} = delete $args{addr} ) {
+	} elsif ( my $addr = delete $args{addr} ) {
 		my $port = delete $args{port};
 		# port = 0 -> get port from system
-		if ( ! defined $port ) { 
+		if ( ! defined $port ) {
 			$port = $1 if $addr =~s{:(\d+)$}{};
-			$port ||= 5060; 
-		} 
+			$port ||= 5060;
+		}
 		my $proto = $self->{proto} = delete $args{proto} || 'udp';
 		$self->{sock} = IO::Socket::INET->new(
 			Proto => $proto,
@@ -65,10 +65,11 @@ sub new {
 		# get the assigned port
 		($port) = unpack_sockaddr_in( getsockname( $self->{sock} ));
 		$self->{port} = $port;
+		$self->{addr} = $addr;
 	}
 
 	unless ( $self->{contact}  = delete $args{contact} ) {
-		my ($port,$sip_proto) = 
+		my ($port,$sip_proto) =
 			$self->{port} == 5060 ? ( '','sip' ) :
 			$self->{port} == 5061 && $self->{proto} eq 'udp' ? ( '','sips' ) :
 			( ":$self->{port}",'sip' )
@@ -102,11 +103,11 @@ sub forward_incoming {
 	my $maxf = $packet->get_header( 'max-forwards' );
 	# we don't want to put somebody Max-Forwards: 7363535353 into the header
 	# and then crafting a loop, so limit it to the default value
-	$maxf = 70 if !$maxf || $maxf>70; 
+	$maxf = 70 if !$maxf || $maxf>70;
 	$maxf--;
 	if ( $maxf <= 0 ) {
 		# just drop
-		return [ undef,'max-forwards reached 0, dropping' ]; 
+		return [ undef,'max-forwards reached 0, dropping' ];
 	}
 
 	if ( $packet->is_response ) {
@@ -129,7 +130,7 @@ sub forward_incoming {
 			my ($vref,$hdr) = @_;
 			if ( !$$vref ) {
 				# XXXXXXX maybe check that no received header existed before
-				$$vref = $hdr->{value}.= 
+				$$vref = $hdr->{value}.=
 					";received=$self->{addr}:$self->{port}";
 				$hdr->set_modified;
 			}
@@ -246,14 +247,36 @@ sub deliver {
 		# clone packet, because I don't want to change the original
 		# one because it might be retried later
 		# (could skip this for tcp?)
-		$packet = $packet->clone; 
+		$packet = $packet->clone;
 		$packet->insert_header( via => $self->{via} );
 	}
 
-	my ($proto,$host,$port) = 
+	my ($proto,$host,$port) =
 		$addr =~m{^(?:(\w+):)?([\w\-\.]+)(?::(\d+))?$};
 	#DEBUG( "%s -> %s %s %s",$addr,$proto||'',$host, $port||'' );
 	$port ||= 5060; # only right for sip, not sips!
+
+
+	$self->sendto( $packet->as_string, $host,$port,$callback )
+		|| return;
+	DEBUG( 2, "delivery from $self->{addr}:$self->{port} to $addr OK:\n%s",
+		$packet->dump( Net::SIP::Debug->level -2 ) );
+}
+
+###########################################################################
+# send data to peer
+# Args: ($self,$data,$host,$port,$callback)
+#   $data: string representation of SIP packet
+#   $host: target ip
+#   $port: target port
+#   $callback: callback for error|success, see method deliver
+# Returns: $success
+#   $success: true if no problems occured while sending (this does not
+#     mean that the packet was delivered reliable!)
+###########################################################################
+sub sendto {
+	my Net::SIP::Leg $self = shift;
+	my ($data,$host,$port,$callback) = @_;
 
 	# XXXXX for now udp only
 	# for tcp the delivery might be done over multiple callbacks
@@ -271,27 +294,30 @@ sub deliver {
 		invoke_callback( $callback, EINVAL );
 	}
 
-	# XXXXX if host is not IP but hostname this might block!
-	$host = inet_aton( $host );
-	my $target = sockaddr_in( $port,$host );
-	unless ( $self->{sock}->send( $packet->as_string,0,$target )) {
+	my $host4 = inet_aton( $host ) or do {
+		# this should not happen because host should better be IP
+		DEBUG( 1, "lookup problems of $host?" );
+		invoke_callback( $callback, EINVAL );
+		return;
+	};
+
+	my $target = sockaddr_in( $port,$host4 );
+	unless ( $self->{sock}->send( $data,0,$target )) {
 		DEBUG( 1,"send failed: callback=$callback error=$!" );
 		invoke_callback( $callback, $! );
 		return;
 	}
 
-	DEBUG( 2, "delivery from $self->{addr}:$self->{port} to $addr OK:\n%s",
-		$packet->dump( Net::SIP::Debug->level -2 ) );
-
-	# XXXX dont forget to call callback back with ENOERR if 
+	# XXXX dont forget to call callback back with ENOERR if
 	# delivery by tcp successful
+	return 1;
 }
 
 ###########################################################################
 # receive packet
 # for udp socket it just makes a recv on the socket and returns the packet
 # for tcp master sockets it makes accept and creates a new leg based on
-#   the masters leg. 
+#   the masters leg.
 # Args: ($self)
 # Returns: ($packet,$from) || ()
 #   $packet: Net::SIP::Packet
@@ -339,12 +365,28 @@ sub check_via {
 
 ###########################################################################
 # check if the leg could deliver to the specified addr
-# Args: ($self,$addr)
-# Returns: 1|0
+# Args: ($self,($addr|%spec))
+#  $addr: addr|proto:addr|addr:port|proto:addr:port
+#  %spec: hash with keys addr,proto,port
+# Returns: $bool
+#  $bool: true if we can deliver to $ip with $proto
 ###########################################################################
 sub can_deliver_to {
 	my Net::SIP::Leg $self = shift;
-	my $addr = shift;
+	my %spec;
+	if (@_>1) {
+		%spec = @_
+	} else {
+		my $spec = shift;
+		my ($proto,$addr) = $spec =~m{^(?:(udp|tcp):)?([^:]+)}
+			or return; # wrong spec?
+		$spec{proto} = $proto if $proto;
+		$spec{addr}  = $addr;
+		# ignore port
+	}
+
+	# check against proto of leg
+	return if ( $spec{proto} && $spec{proto} ne $self->{proto} );
 
 	# XXXXX dont know how to find out if I can deliver to this addr from this
 	# leg without lookup up route
@@ -363,5 +405,16 @@ sub fd {
 	return $self->{sock};
 }
 
+###########################################################################
+# some info about the Leg for debugging
+# Args: $self
+# Returns: string
+###########################################################################
+sub dump {
+	my Net::SIP::Leg $self = shift;
+	return ref($self)." $self->{proto}:$self->{addr}:$self->{port}";
+}
 	
+
+
 1;

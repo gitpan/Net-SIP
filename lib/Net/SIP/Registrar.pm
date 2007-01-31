@@ -71,7 +71,10 @@ sub receive {
 
 	# what address will be registered
 	($from) = sip_hdrval2parts( from => $from );
-	$from = $1 if $from =~m{<(sips?:\S+)>}i;
+	if ( my ($domain,$user,$proto) = sip_uri2parts( $from ) ) {
+		# normalize if possible
+		$from = "$proto:$user\@$domain";
+	}
 
 	# check if domain is allowed
 	if ( my $rd = $self->{domains} ) {
@@ -98,7 +101,7 @@ sub receive {
 		$c_addr = $1 if $c_addr =~m{<(\w+:\S+)>}; # do we really need this?
 		my $expire = $param->{expires};
 		$expire = $glob_expire if ! defined $expire;
-		$expire = $self->{max_expires} 
+		$expire = $self->{max_expires}
 			if ! defined $expire || $expire > $self->{max_expires};
 		if ( $expire ) {
 			if ( $expire < $self->{min_expires} ) {
@@ -113,7 +116,7 @@ sub receive {
 		}
 		$curr->{$c_addr} = $expire;
 	}
-	
+
 	# expire now!
 	$self->expire();
 	DEBUG_DUMP( 100,$store );
@@ -128,6 +131,19 @@ sub receive {
 	# send back where it came from
 	$disp->deliver( $response, leg => $leg, dst_addr => $addr );
 	return 200;
+}
+
+###########################################################################
+# return information for SIP address
+# Args: ($self,$addr)
+# Returns: @sip_contacts
+###########################################################################
+sub query {
+	my Net::SIP::Registrar $self = shift;
+	my $addr = shift;
+	DEBUG( 50,"lookup of $addr" );
+	my $contacts = $self->{store}{$addr} || return;
+	return grep { m{^sips?:} } keys %$contacts;
 }
 
 ###########################################################################
