@@ -20,7 +20,7 @@ $SIG{ __DIE__ } = sub {
 # Returns: NONE
 ############################################################################
 my @pids;
-sub killall { 
+sub killall {
 	my $sig = shift || 9;
 	kill $sig, @pids;
 	#diag( "killed @pids with $sig" );
@@ -91,7 +91,7 @@ sub fd_grep {
 			if ( $$buf =~s{\A(?:.*?)($pattern)(.*)}{$2}s ) {
 				#diag( "found" );
 				return $1;
-			} 
+			}
 		}
 
 		# if not found try to read new data
@@ -149,8 +149,7 @@ sub sip_dump_media {
 	if ( $packet->is_request ) {
 		$dump .= sprintf "REQ(%s) ",$packet->method;
 	} else {
-		my ($method) = $packet->cseq =~m{\d+\s+(\w+)};
-		$dump .= sprintf "RSP(%s,%s) ",$method,$packet->code;
+		$dump .= sprintf "RSP(%s,%s) ",$packet->method,$packet->code;
 	}
 	if ( my $sdp = $packet->sdp_body ) {
 		$dump .= "SDP:";
@@ -162,9 +161,9 @@ sub sip_dump_media {
 	}
 	print $dump."\n";
 }
-	
+
 ############################################################################
-# redfined Leg for Tests:
+# redefined Leg for Tests:
 # - can have explicit destination
 # - can intercept receive and deliver for printing out packets
 ############################################################################
