@@ -9,23 +9,15 @@
 use strict;
 use warnings;
 use Test::More tests => 8;
+do './testlib.pl' || do './t/testlib.pl' || die "no testlib";
 
 use Net::SIP ':all';
 use IO::Socket;
 use File::Temp;
 
-# create leg for UAS on dynamic port
-my $sock_uas = IO::Socket::INET->new(
-	Proto     => 'udp',
-	LocalAddr => '127.0.0.1',
-	LocalPort => 0, # let system pick one
-) || die $!;
 
-# get address for UAS
-my $uas_addr = do {
-	my ($port,$host) = unpack_sockaddr_in ( getsockname($sock_uas));
-	inet_ntoa( $host ).":$port"
-};
+# create leg for UAS on dynamic port
+my ($sock_uas,$uas_addr) = create_socket();
 diag( "UAS on $uas_addr" );
 
 # fork UAS and make call from UAC to UAS
@@ -42,7 +34,7 @@ if ( $pid == 0 ) {
 
 # PARENT = UAC
 close( $sock_uas );
-close($write); 
+close($write);
 
 alarm(15);
 $SIG{__DIE__} = $SIG{ALRM} = sub { kill 9,$pid; ok( 0,'died' ) };
@@ -79,10 +71,10 @@ sub uac {
 	ok( $uac, 'UAC created' );
 
 	# wait until UAS is ready and listening
-	ok( <$pipe>, "UAS ready\n" ); 
+	ok( <$pipe>, "UAS ready\n" );
 
 	# Call UAS
-	my $call = $uac->invite( 
+	my $call = $uac->invite(
 		'you.uas@example.com',
 		init_media  => $uac->rtp( 'send_recv', $send_something ),
 		cb_rtp_done => \$rtp_done,
@@ -98,7 +90,7 @@ sub uac {
 	$call->loop( \$stop,10 );
 	ok( $stop, 'UAS down' );
 
-	ok( <$pipe>, "UAS RTP ok\n" ); 
+	ok( <$pipe>, "UAS RTP ok\n" );
 }
 
 ###############################################
@@ -126,7 +118,7 @@ sub uas {
 	$uas->listen(
 		cb_create      => sub { diag( 'call created' ) },
 		cb_established => sub { diag( 'call established' ) },
-		cb_cleanup     => sub { 
+		cb_cleanup     => sub {
 			diag( 'call cleaned up' );
 			$call_closed =1;
 		},
@@ -143,7 +135,7 @@ sub uas {
 
 	# at least 20% of all RTP packets should come through
 	if ( @received > 20 ) {
-		print $pipe "UAS RTP ok\n" 
+		print $pipe "UAS RTP ok\n"
 	} else {
 		print $pipe "UAS RTP received only ".int(@received)."/100 packets\n";
 	}

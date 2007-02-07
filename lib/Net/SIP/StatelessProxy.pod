@@ -113,5 +113,13 @@ was no need to touch it.
 
 =back
 
+=head1 UNDOCUMENTED METHODS
+
+=over 4
+
+=item idside2hash
+
+=back
+
 
 
