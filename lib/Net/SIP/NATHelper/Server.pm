@@ -7,15 +7,21 @@ use warnings;
 #   read commands from socket and propagete them to NATHelper, send
 #   replies back
 #
-# FIXME: integrate into other eventloops, do not build own
 ############################################################################
 
 package Net::SIP::NATHelper::Server;
+use fields qw( helper callbacks cfd commands );
+
 use Net::SIP qw(invoke_callback :debug);
 use Net::SIP::NATHelper::Base;
-
 use Storable qw(thaw nfreeze);
 use Data::Dumper;
+
+my %default_commands = (
+	allocate => sub { shift->allocate_sockets(@_) },
+	activate => sub { shift->activate_session(@_) },
+	close    => sub { shift->close_session(@_) },
+);
 
 
 ############################################################################
@@ -33,11 +39,14 @@ sub new {
 	} else {
 		$helper = Net::SIP::NATHelper::Base->new;
 	}
-	return bless {
+	my $self = fields::new( $class );
+	%$self = (
 		helper => $helper,
 		callbacks => [],
 		cfd => \@_,
-	},$class;
+		commands => { %default_commands },
+	);
+	return $self,
 }
 
 ############################################################################
@@ -78,15 +87,11 @@ sub do_command {
 	};
 
 	DEBUG( 100, "request=".Dumper([$cmd,@args]));
-	my $reply =
-		$cmd eq 'allocate' ? $self->allocate_sockets(@args) :
-		$cmd eq 'activate' ? $self->activate_session(@args) :
-		$cmd eq 'close'    ? $self->close_session(@args)    :
-		do {
-			DEBUG( 10,"unknown command: $cmd" );
-			return;
-		}
-		;
+	my $cb = $self->{commands}{$cmd} or do {
+		DEBUG( 10,"unknown command: $cmd" );
+		return;
+	};
+	my $reply = invoke_callback($cb,$self,@args);
 	unless ( defined( $reply )) {
 		DEBUG( 10, "no reply for $cmd" );
 	}
