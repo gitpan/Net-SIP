@@ -98,6 +98,7 @@ sub registrar {
 		dispatcher => $ua->{dispatcher},
 		user2pass => sub { $_[0] eq 'wolf' ? 'lobo' : 'secret' },
 		realm => 'REALM.example.com',
+		opaque => 'HumptyDumpty',
 		i_am_proxy => 0,
 	);
 	my $auth_chain = ReceiveChain->new(

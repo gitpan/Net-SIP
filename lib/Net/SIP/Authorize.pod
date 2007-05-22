@@ -41,6 +41,11 @@ L<Net::SIP::Dispatcher> object manging the registar. Mandatory.
 
 The realm for the authentication request. Defaults to 'p5-net-sip'.
 
+=item opaque
+
+Optional value for C<opaque> parameter for the authentication request.
+If none is given no C<opaque> parameter will be used.
+
 =item user2pass
 
 Either hash reference with C<user,password> mapping or callback,
