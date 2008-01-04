@@ -1,5 +1,15 @@
 Revision history for Net::SIP
 
+0.41
+   - give 'contact' header to Net::SIP::Simple which is then used for
+     invite and register
+   - more checks of data when parsing SIP header, more knowledge about 
+     keys, where the values cannot be comma-seperated
+     (http://rt.cpan.org/Public/Bug/Display.html?id=31236)
+   - fix wrong call of ok() in t/03_forward_stateless
+   - fix http://rt.cpan.org/Public/Bug/Display.html?id=31284
+     (Net::SIP::Request::set_uri did not update string representation)
+
 0.40
   - Net::SIP::Simple::RTP - when sending data from file set the timestamp
     based on sequence number and packet size ( == samples in packet for 8bit)
