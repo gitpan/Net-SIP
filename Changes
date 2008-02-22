@@ -1,5 +1,15 @@
 Revision history for Net::SIP
 
+0.43
+   - enforce codec 0 PCMU/8000 in outgoing SDP generated based on
+     incoming SDP, don't just accept all codecs the other party offers
+     because Net::SIP::Simple can only PCMU/8000
+   - make header names per default ucfirst (Via not via)
+   - add default allow and supported headers to INVITE requests and
+     2xx responses if none where given
+   - fix bug indroduced in 0.42, where contact from incoming INVITE
+     was not used as URI for outgoing BYE for the call
+
 0.42
    - on 2xx responses set the URI of the dialog to the contact given
      in the response. For 302 retry the request with the URI set to
