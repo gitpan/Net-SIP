@@ -1,5 +1,8 @@
 Revision history for Net::SIP
 
+0.55_1 2010-02-02
+- add samples/register_and_redirect.pl
+
 0.55 2010-01-27
 - Net::SIP::Redirect provides functionlity to redirect INVITES using
   information from registrar. Sample program
