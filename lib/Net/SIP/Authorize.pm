@@ -127,7 +127,7 @@ sub receive {
 		# be checked against method INVITE
 		# for CANCEL the RFC doesn't say anything, so we assume it uses
 		# CANCEL but try INVITE if this fails
-		my @a2 = 
+		my @a2 =
 			$method eq 'ACK' ? ("INVITE:$uri") :
 			$method eq 'CANCEL' ? ("CANCEL:$uri","INVITE:$uri") :
 			("$method:$uri");
@@ -163,7 +163,7 @@ sub receive {
 	# if authorized remove authorization data from this realm
 	# and pass packet thru
 	if ( $authorized ) {
-		DEBUG( 10, "Request authorized". $packet->dump );
+		DEBUG( 10, "Request authorized ". $packet->dump );
 		# set header again
 		$packet->set_header( $rq_key => \@keep_auth );
 		return;
@@ -173,7 +173,13 @@ sub receive {
 	# they should provide the right data already
 	# unauthorized CANCEL or ACK are only valid as response to
 	# 401/407 from this Authorize, so they should not be propagated
-	return $acode if $method eq 'CANCEL' or $method eq 'ACK'; 
+	if ($method eq 'ACK') {
+		# cancel delivery of response to INVITE
+		$self->{dispatcher}->cancel_delivery( $packet->tid );
+		return $acode;
+	} elsif ($method eq 'CANCEL') {
+		return $acode;
+	}
 
 	# not authorized yet, ask to authenticate
 	# keep it simple RFC2069 style
