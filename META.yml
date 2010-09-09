@@ -1,9 +1,9 @@
 --- #YAML:1.0
 name:               Net-SIP
-version:            0.59
+version:            0.59_9
 abstract:           ~
 author:  []
-license:            unknown
+license:            http://dev.perl.org/licenses/
 distribution_type:  module
 configure_requires:
     ExtUtils::MakeMaker:  0
@@ -15,7 +15,8 @@ no_index:
     directory:
         - t
         - inc
-generated_by:       ExtUtils::MakeMaker version 6.55_02
+generated_by:       ExtUtils::MakeMaker version 6.54
 meta-spec:
     url:      http://module-build.sourceforge.net/META-spec-v1.4.html
     version:  1.4
+repository:         http://github.com/noxxi/p5-net-sip

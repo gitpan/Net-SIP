@@ -13,7 +13,7 @@ use Carp 'croak';
 use Net::SIP::Debug;
 use Net::SIP::Util ':all';
 use Digest::MD5 'md5_hex';
-use fields qw( realm opaque user2pass user2a1 i_am_proxy dispatcher );
+use fields qw( realm opaque user2pass user2a1 i_am_proxy dispatcher filter );
 
 ###########################################################################
 # creates new Authorize object
@@ -24,6 +24,19 @@ use fields qw( realm opaque user2pass user2a1 i_am_proxy dispatcher );
 #        password if given username
 #     dispatcher: Dispatcher object
 #     i_am_proxy: true if should send Proxy-Authenticate, not WWW-Authenticate
+#     filter: hashref with extra verification chain, see packages below.
+#      Usage:
+#      filter => {
+#       # filter chain for registration
+#       REGISTER => [
+#        # all of this three must succeed (user can regist himself)
+#        [ 'ToIsFrom','FromIsRealm','FromIsAuthUser' ],
+#        # or this must succeed
+#        \&call_back, # callback. If arrayref you MUST set [ \&call_back ]
+#       ]
+#       # filter chain for invites
+#       INVITE => 'FromIsRealm',
+#      }
 # Returns: $self
 ###########################################################################
 sub new {
@@ -38,6 +51,36 @@ sub new {
 	$self->{user2a1} = $args{user2a1};
 	$self->{i_am_proxy} = $args{i_am_proxy};
 	$self->{dispatcher} = $args{dispatcher} || croak 'no dispatcher';
+
+	if ( my $f = $args{filter}) {
+		croak 'filter must be hashref' if ref($f) ne 'HASH';
+		my %filter;
+		while (my($method,$chain) = each %$f) {
+			$chain = [ $chain ] if ref($chain) ne 'ARRAY';
+			map { $_ = [$_] if ref($_) ne 'ARRAY' } @$chain;
+			# now we have:
+			# method => [[ cb00,cb01,cb02,..],[ cb10,cb11,cb12,..],...]
+			# where either the cb0* chain or the cb1* chain or the cbX* has to succeed
+			for my $or (@$chain) {
+				for (@$or) {
+					if (ref($_)) {
+						# assume callback
+					} else {
+						# must have authorize class with verify method
+						my $pkg = __PACKAGE__."::$_";
+						my $sub = UNIVERSAL::can($pkg,'verify') || do {
+							# load package
+							eval "require $pkg";
+							UNIVERSAL::can($pkg,'verify')
+						} or die "cannot find sub ${pkg}::verify";
+						$_ = $sub;
+					}
+				}
+			}
+			$filter{uc($method)} = $chain;
+		}
+		$self->{filter} = \%filter;
+	}
 	return $self;
 }
 
@@ -123,6 +166,8 @@ sub receive {
 			$a1_hex = md5_hex(join( ':',$user,$realm,$pass ));
 		}
 
+		last if ! defined $a1_hex; # not in user2a1 || user2pass
+
 		# ACK just reuse the authorization from INVITE, so they should
 		# be checked against method INVITE
 		# for CANCEL the RFC doesn't say anything, so we assume it uses
@@ -154,7 +199,21 @@ sub receive {
 			}
 
 			if ( $resp eq $want_response ) {
-				$authorized = 1;
+				if ($self->{filter} and my $or = $self->{filter}{$method}) {
+					for my $and (@$or) {
+						$authorized = 1;
+						for my $cb (@$and) {
+							if ( ! invoke_callback(
+								$cb,$packet,$leg,$addr,$user,$realm)) {
+								$authorized = 0;
+								last;
+							}
+						}
+						last if $authorized;
+					}
+				} else {
+					$authorized = 1;
+				}
 				last;
 			}
 		}
@@ -198,6 +257,64 @@ sub receive {
 	# return $acode (TRUE) to show that packet should
 	# not passed thru
 	return $acode;
+}
+
+###########################################################################
+# additional verifications
+#  Net::SIP::Authorize::FromIsRealm - checks if the domain in 'From' is
+#   the same as the realm in 'Authorization'
+#  Net::SIP::Authorize::FromIsAuthUser - checks if the user in 'From' is
+#   the same as the username in 'Authorization'
+#  Net::SIP::Authorize::ToIsFrom - checks if 'To' and 'From' are equal
+#
+# Args each: ($packet,$leg,$addr,$auth_user,$auth_realm)
+#  $packet: Net::SIP::Request
+#  $leg: Net::SIP::Leg where request came in (and response gets send out)
+#  $addr: ip:port where request came from and response will be send
+#  $auth_user: username from 'Authorization'
+#  $auth_realm: realm from 'Authorization'
+# Returns: TRUE (1) | FALSE (0)
+###########################################################################
+
+package Net::SIP::Authorize::FromIsRealm;
+use Net::SIP::Util qw( sip_hdrval2parts sip_uri2parts );
+use Net::SIP::Debug;
+sub verify {
+	my ($packet,$leg,$addr,$auth_user,$auth_realm) = @_;
+	my $from = $packet->get_header('from');
+	($from) = sip_hdrval2parts( from => $from );
+	my ($domain) = sip_uri2parts($from);
+	return 1 if lc($domain) eq lc($auth_realm); # exact domain
+	return 1 if $domain =~m{\.\Q$auth_realm\E$}i; # subdomain
+	DEBUG( 10, "No Auth-success: From-domain is '$domain' and realm is '$auth_realm'" );
+	return 0;
+}
+
+package Net::SIP::Authorize::FromIsAuthUser;
+use Net::SIP::Util qw( sip_hdrval2parts sip_uri2parts );
+use Net::SIP::Debug;
+sub verify {
+	my ($packet,$leg,$addr,$auth_user,$auth_realm) = @_;
+	my $from = $packet->get_header('from');
+	($from) = sip_hdrval2parts( from => $from );
+	my (undef,$user) = sip_uri2parts($from);
+	return 1 if lc($user) eq lc($auth_user);
+	DEBUG( 10, "No Auth-success: From-user is '$user' and auth_user is '$auth_user'" );
+	return 0;
+}
+
+package Net::SIP::Authorize::ToIsFrom;
+use Net::SIP::Util qw( sip_hdrval2parts );
+use Net::SIP::Debug;
+sub verify {
+	my ($packet,$leg,$addr,$auth_user,$auth_realm) = @_;
+	my $from = $packet->get_header('from');
+	($from) = sip_hdrval2parts( from => $from );
+	my $to = $packet->get_header('to');
+	($to) = sip_hdrval2parts( to => $to );
+	return 1 if lc($from) eq lc($to);
+	DEBUG( 10, "No Auth-success: To is '$to' and From is '$from'" );
+	return 0;
 }
 
 1;
