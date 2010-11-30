@@ -54,7 +54,7 @@ use Net::SIP::Util ':all';
 #   @args: either single \%args (hash-ref) or %args (hash) with at least
 #     values for from and to
 #     callid,cseq will be generated if not given
-#     routes will default to [] and usually set from record-route header
+#     routes will default to undef and usually set from record-route header
 #     in response packets
 # Returns: $self
 ############################################################################
@@ -65,7 +65,6 @@ sub new {
 	%$self = %args;
 	$self->{callid} ||= md5_hex( time(), rand(2**32) );
 	$self->{cseq} ||= 0;
-	$self->{route} ||= [];
 	$self->{_transactions} = [];
 	$self->{_cseq_incoming} = 0;
 
@@ -159,6 +158,7 @@ sub new_request {
 		# already a request object
 		$request = $method;
 		$method = $request->method;
+
 	} else {
 
 		# increase cseq unless its explicitly specified
@@ -187,15 +187,17 @@ sub new_request {
 				from => $from,
 				to => $to,
 				$self->{contact} ? ( contact => $self->{contact} ):(),
-				route => $self->{route},
 				cseq => "$cseq $method",
 				'call-id' => $self->{callid},
 				'max-forwards' => 70,
-				%args
+				%args,
 			},
 			$body
-		)
+		);
 	}
+
+	# overwrite any route header in request if we already learned a route
+	$request->set_header( route => $self->{route} ) if $self->{route};
 
 	# create new transaction
 	my %trans = (
@@ -417,7 +419,7 @@ sub handle_response {
 	} elsif ( $code == 305 ) {
 		# 21.3.4 305 use proxy
 		# set proxy as the first route and insert request again
-		my $route = $self->{route};
+		my $route = $self->{route} ||= [];
 		unshift @$route,$response->get_header( 'contact' );
 		( my $r = $tr->{request} )->set_header( route => $route );
 		$r->set_cseq( ++$self->{cseq} );
@@ -489,7 +491,9 @@ sub handle_request {
 	my @arg = ($endpoint,$self);
 
 	# extract route information for future requests to the UAC (re-invites)
-	if ( my @route = $request->get_header( 'record-route' )) {
+	# only for INVITE (rfc3261,12.1.1)
+	if ( $method eq 'INVITE' and 
+		my @route = $request->get_header( 'record-route' )) {
 		$self->{route} = \@route;
 	}
 

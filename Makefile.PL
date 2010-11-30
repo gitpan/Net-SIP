@@ -6,8 +6,4 @@ WriteMakefile(
 	PREREQ_PM => {
 		'Net::DNS' => 0.56,
 	},
-	META_MERGE => {
-		repository => 'http://github.com/noxxi/p5-net-sip',
-		license => 'http://dev.perl.org/licenses/'
-	}
 );
