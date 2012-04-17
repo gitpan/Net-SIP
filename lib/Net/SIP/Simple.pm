@@ -339,7 +339,7 @@ sub register {
 
 		} elsif ( $code ) {
 			$self->error( "Failed with code $code" );
-			invoke_callback( $cb_final, 'FAIL', code => $code );
+			invoke_callback( $cb_final, 'FAIL', code => $code, packet => $packet );
 		} elsif ( $errno ) {
 			$self->error( "Failed with error $errno" );
 			invoke_callback( $cb_final, 'FAIL', errno => $errno );
@@ -362,22 +362,24 @@ sub register {
 ###########################################################################
 # create new call
 # and waits until the INVITE is completed (e.g final response received)
-# Args: ($self,$to;%args)
-#   $to: sip address of peer
+# Args: ($self,$ctx;%args)
+#   $ctx: \%ctx context describing the call or sip address of peer
 #   %args: see Net::SIP::Simple::Call::invite
 # Returns: $call
 #   $call: Net::SIP::Simple::Call
 ###########################################################################
 sub invite {
 	my Net::SIP::Simple $self = shift;
-	my ($to,%args) = @_;
+	my ($ctx,%args) = @_;
+	my $to = ref($ctx) ? $ctx->{to} : $ctx;
 	$to || croak( "need peer of call" );
 	if ( $to !~m{\s} && $to !~m{\@} ) {;
 		croak( "no domain and no fully qualified to" ) if ! $self->{domain};
-		$to = "$to <sip:$to\@$self->{domain}>"
+		$to = "$to <sip:$to\@$self->{domain}>";
+		$ctx->{to} = $to if $ctx;
 	}
-	my $call = Net::SIP::Simple::Call->new( $self,$to );
-	$call->reinvite(%args );
+	my $call = Net::SIP::Simple::Call->new( $self,$ctx||$to );
+	$call->reinvite(%args);
 	return $call;
 }
 
