@@ -14,6 +14,7 @@ package Net::SIP::SDP;
 use Hash::Util qw(lock_keys);
 use Net::SIP::Debug;
 use Socket;
+use Scalar::Util 'looks_like_number';
 
 
 ###########################################################################
@@ -312,6 +313,32 @@ sub get_media {
 	my $self = shift;
 	my $m = $self->{media} || [];
 	return wantarray ? @$m : $m;
+}
+
+###########################################################################
+# returns type number to RTP codec name, e.g. 'telephone-event/8000' -> 101
+# Args: ($self,$name,[$index])
+#  $name: name of codec
+#  $index: index or type of media description, default 0, e.g. the first
+#   channel. 'audio' would specify the first audio channel
+# Returns: type number|undef
+###########################################################################
+sub name2int {
+	my ($self,$name,$index) = @_;
+	$index = 0 if ! defined $index;
+	my $m = $self->{media};
+	if ( ! looks_like_number($index)) {
+		# look for media type
+		my @i = grep { $m->[$_]{media} eq $index } (0..$#$m) or return;
+		$index = $i[0];
+	}
+	$m = $m->[$index] or return;
+	for my $l (@{$m->{lines}}) {
+		$l->[0] eq 'a' or next;
+		$l->[1] =~m{^rtpmap:(\d+)\s+(\S+)} or next;
+		return $1 if $2 eq $name;
+	}
+	return;
 }
 
 ###########################################################################

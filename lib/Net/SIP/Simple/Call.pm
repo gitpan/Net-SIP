@@ -44,6 +44,8 @@ use fields qw( call_cleanup rtp_cleanup ctx param );
 #   cb_established: callback which will be called on receiving ACK in INVITE
 #       with (status,self) where status is OK|FAIL
 #   cb_invite: callback called with ($self,$packet) when INVITE is received
+#   cb_dtmf: callback called with ($event,$duration) when DTMF events
+#       are received, works only with media handling from Net::SIP::Simple::RTP
 #   sip_header: hashref of SIP headers to add
 #   call_on_hold: one-shot parameter to set local media addr to 0.0.0.0,
 #       will be set to false after use
@@ -56,6 +58,7 @@ use fields qw( call_cleanup rtp_cleanup ctx param );
 
 use Net::SIP::Util qw(create_rtp_sockets invoke_callback);
 use Net::SIP::Debug;
+use Net::SIP::DTMF 'dtmf_extractor';
 use Socket;
 use Storable 'dclone';
 use Carp 'croak';
@@ -88,6 +91,7 @@ sub new {
 	$self->{param} = $param ||= {};
 	$param->{init_media} ||= $self->rtp( 'media_recv_echo' );
 	$param->{rtp_param}  ||= [ 0,160,160/8000 ]; # PCMU/8000: 5*160 bytes/second
+	$param->{dtmf_events} ||= []; # get added by sub dtmf
 	return $self;
 }
 
@@ -158,7 +162,7 @@ sub get_param {
 
 ###########################################################################
 # (Re-)Invite other party
-# Args: ($self;%param)
+# Args: ($self,%param)
 #   %param: see description of field 'param', gets merged with param
 #     already on object so that the values are valid for future use
 # Returns: Net::SIP::Endpoint::Context
@@ -376,6 +380,77 @@ sub bye {
 }
 
 ###########################################################################
+# send DTMF (dial tone) events
+# Args: ($self,$events,%args)
+#  $events: string of characters from dial pad, any other character will
+#    cause pause
+#  %args:
+#    duration: length of dial tone in milliseconds, default 100
+#    cb_final: callback called with (status,errormsg) when done
+#       status can be OK|FAIL. If not given will wait until all
+#       events are sent
+#    methods: methods it should try for DTMF in this order
+#       default is 'rfc2833,audio'. If none of the specified
+#       methods is supported by peer it will croak
+# Returns: NONE
+# Comments: works only with media handling from Net::SIP::Simple::RTP
+###########################################################################
+sub dtmf {
+	my ($self,$events,%args) = @_;
+	my $duration = $args{duration} || 100;
+	my @methods = split(m{[\s,]+}, lc($args{methods}||'rfc2833,audio'));
+
+	my %payload_type;
+	while ( ! %payload_type
+		and my $m = shift(@methods)) {
+		my $type;
+		if ( $m eq 'rfc2833' ) {
+			$type = $self->{param}{sdp_peer}
+				&& $self->{param}{sdp_peer}->name2int('telephone-event/8000','audio');
+		} elsif ( $m eq 'audio' ) {
+			$type = $self->{param}{sdp_peer}
+				&& $self->{param}{sdp_peer}->name2int('PCMU/8000','audio')
+				|| 0; # default id for PCMU/8000
+		} else {
+			croak("unknown method $m in methods:$args{methods}");
+		}
+		%payload_type = ( $m."_type" => $type ) if defined $type;
+	}
+	%payload_type or croak("no usable DTMF method found");
+
+	my $arr = $self->{param}{dtmf_events};
+	my $lastev;
+	for( split('',$events)) {
+		if ( m{[\dA-D*#]} ) {
+			if (defined $lastev) {
+				# force some silence to distinguish DTMF
+				push @$arr, {
+					duration => 50,
+					%payload_type
+				}
+			}
+			push @$arr, {	
+				event => $_, 
+				duration => $duration,
+				%payload_type,
+			};
+			$lastev = $_;
+		} else {
+			# pause
+			push @$arr, { duration => $duration, %payload_type };
+			$lastev = undef;
+		}
+	}
+	if ( my $cb_final = $args{cb_final} ) {
+		push @$arr, { cb_final => $cb_final }
+	} else {
+		my $stopvar;
+		push @$arr, { cb_final => \$stopvar };
+		$self->loop(\$stopvar);
+	}
+}
+
+###########################################################################
 # handle new packets within existing call
 # Args: ($self,$endpoint,$ctx,$error,$code,$packet,$leg,$from)
 #   $endpoint: the endpoint
@@ -482,8 +557,10 @@ sub _setup_peer_rtp_socks {
 	}
 
 	my $raddr = $param->{media_raddr} = [];
+	my @media_dtmfxtract;
 	my $null_address = pack( 'CCCC',0,0,0,0 ); # c=0.0.0.0 => call on hold
-	foreach my $m (@media) {
+	for( my $i=0;$i<@media;$i++) {
+		my $m = $media[$i];
 		my $range = $m->{range} || 1;
 		my $paddr = inet_aton( $m->{addr} );
 		if ( $paddr eq $null_address ) {
@@ -493,8 +570,25 @@ sub _setup_peer_rtp_socks {
 			my @socks = map { scalar(sockaddr_in( $m->{port}+$_ , $paddr )) }
 				(0..$range-1);
 			push @$raddr, @socks == 1 ? $socks[0] : \@socks;
+
+			if ( $m->{media} eq 'audio' and $param->{cb_dtmf} ) {
+				my %rmap = ( 
+					'PCMU/8000' => 'audio_type',
+					'telephone-event/8000' => 'rfc2833_type'
+				);
+				my %pargs = ( audio_type => 0 ); # 0 is default type for PCMU/8000
+				for my $l (@{$m->{lines}}) {
+					$l->[0] eq 'a' or next;
+					my ($type,$name) = $l->[1] =~m{^rtpmap:(\d+)\s+(\S+)} or next;
+					my $pname = $rmap{$name} or next;
+					$pargs{$pname} = $type;
+				}
+				$media_dtmfxtract[$i] = dtmf_extractor(%pargs) if %pargs;
+			}
 		}
 	}
+
+	$param->{media_dtmfxtract} = @media_dtmfxtract ? \@media_dtmfxtract :undef;
 
 	return 1;
 }
@@ -539,17 +633,20 @@ sub _setup_local_rtp_socks {
 					proto => $m->{proto},
 					range => $m->{range},
 					fmt   => $m->{fmt},
+					a     => [ "rtpmap:101 telephone-event/8000", "fmtp:101 0-16" ],
 				};
 			}
 		} else {
 			my $rp = $param->{rtp_param};
+			my @a;
+			push @a,( "rtpmap:$rp->[0] $rp->[3]" , "ptime:".$rp->[2]*1000) if $rp->[3];
+			my $te = $rp->[3] && $rp->[0] == 101 ? 102: 101;
+			push @a, ( "rtpmap:$te telephone-event/8000","fmtp:$te 0-16" );
 			push @media, {
 				proto => 'RTP/AVP',
 				media => 'audio',
 				fmt   => $rp->[0] || 0, # PCMU/8000
-				$rp->[3] ? (
-					a => [ "rtpmap:$rp->[0] $rp->[3]" , "ptime:".$rp->[2]*1000 ]
-				) :(),
+				a     => \@a,
 			}
 		}
 
