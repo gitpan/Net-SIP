@@ -46,6 +46,7 @@ use fields qw( call_cleanup rtp_cleanup ctx param );
 #   cb_invite: callback called with ($self,$packet) when INVITE is received
 #   cb_dtmf: callback called with ($event,$duration) when DTMF events
 #       are received, works only with media handling from Net::SIP::Simple::RTP
+#   cb_notify: callback called with ($self,$packet) when NOTIFY is received
 #   sip_header: hashref of SIP headers to add
 #   call_on_hold: one-shot parameter to set local media addr to 0.0.0.0,
 #       will be set to false after use
@@ -380,6 +381,45 @@ sub bye {
 }
 
 ###########################################################################
+# request
+# Args: ($self,$method,$body,%args)
+#   $method: method name
+#   $body:   optional body
+#   %args:
+#     cb_final: callback when response got received
+#     all other args will be used to create request (mostly as header
+#       for the request, see Net::SIP::Endpoint::new_request)
+# Returns: NONE
+###########################################################################
+sub request {
+	my Net::SIP::Simple::Call $self = shift;
+	my ($method,$body,%args) = @_;
+
+	my $cb = delete $args{cb_final};
+	my %cbargs = ( %{ $self->{param} }, %args );
+
+	my $rqcb = [
+		sub {
+			my Net::SIP::Simple::Call $self = shift || return;
+			my ($cb,$args,$endpoint,$ctx,$error,$code,$pkt) = @_;
+			if ( $code && $code =~m{^1\d\d} ) {
+				DEBUG( 10,"got prelimary response for request $method" );
+				return;
+			}
+			invoke_callback( $cb,
+				$error ? 'FAIL':'OK',
+				$self,
+				{ code => $code, packet => $pkt}
+			);
+		},
+		$self,$cb,\%cbargs
+	];
+	weaken( $rqcb->[1] );
+
+	$self->{endpoint}->new_request( $method,$self->{ctx},$rqcb,$body,%args );
+}
+
+###########################################################################
 # send DTMF (dial tone) events
 # Args: ($self,$events,%args)
 #  $events: string of characters from dial pad, any other character will
@@ -515,6 +555,12 @@ sub receive {
 
 			my $response = $packet->create_response( '200','OK',$self->{options} );
 			$self->{endpoint}->new_response( $ctx,$response,$leg,$from );
+
+		} elsif ( $method eq 'NOTIFY' ) {
+
+			my $response = $packet->create_response( '200','OK' );
+			$self->{endpoint}->new_response( $ctx,$response,$leg,$from );
+			invoke_callback($param->{cb_notify},$self,$packet);
 		}
 
 	} else {

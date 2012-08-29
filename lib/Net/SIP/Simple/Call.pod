@@ -172,6 +172,14 @@ B<init_media>. All builtin handlers from L<Net::SIP::Simple::RTP> are supported.
 If no RTP handler is set up or if the RTP handler does not support DTMF
 sending no DTMF will be received without any warning.
 
+=item cb_notify
+
+Callback usable by B<invoke_callback> in L<Net::SIP::Util> which will be
+invoked, when it received an NOTIFY request
+
+Callback will be invoked with C<< ( SELF, REQUEST ) >> where REQUEST
+is the L<Net::SIP::Request> packet for the NOTIFY.
+
 =item sip_header
 
 A reference to a hash with additional SIP headers for the INVITE requests.
@@ -261,6 +269,14 @@ If %ARGS contains B<cb_final> it will be used as a callback and invoked once it 
 the response for the BYE (which might be a response packet or a timeout).
 The rest of %ARGS will be merged with the connection parameter and given as an argument
 to the B<cb_final> callback (as hash reference).
+
+=item request ( METHOD, BODY, %ARGS )
+
+Will create a request with METHOD and BODY and wait for completion.
+If %ARGS contains B<cb_final> it will be used as a callback and invoked once it gets
+the response for the request (or timeout).
+The rest of %ARGS will be used to create request (mostly for request header, see
+L<Net::SIP::Endpoint::new_request>)
 
 =item dtmf ( EVENTS, %ARGS )
 
